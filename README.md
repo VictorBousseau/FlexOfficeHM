@@ -1,36 +1,141 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Flex Office — 3ème étage Rennes
 
-## Getting Started
+Application interne de réservation de bureaux en flex office pour l'équipe
+**Distribution & Performance Commerciale** d'Harmonie Mutuelle (Rennes, 3ème étage).
 
-First, run the development server:
+Elle remplace l'Excel partagé : plan interactif, réservation à la demi-journée,
+mise à jour en temps réel entre utilisateurs.
+
+**47 places réservables** : 12 bureaux numérotés (17 places), 4 open spaces
+(18 places), 2 salles de réunion utilisées comme espaces de travail (12 places).
+
+## Stack
+
+- **Next.js 14** (App Router) + **TypeScript strict**
+- **Tailwind CSS** + **shadcn/ui** (Radix UI)
+- **Supabase** (Postgres + Realtime, plan gratuit)
+- **date-fns** (locale `fr`) · **lucide-react** · **sonner** (toasts)
+- Déploiement **Vercel**
+
+## Prérequis
+
+- **Node.js 18.17+** (testé avec Node 24)
+- Un compte **Supabase** (gratuit) et un compte **Vercel** pour le déploiement
+
+## Installation locale
+
+### 1. Dépendances
+
+```bash
+npm install
+```
+
+### 2. Base de données Supabase
+
+1. Créer un projet sur [supabase.com](https://supabase.com).
+2. Ouvrir **SQL Editor** et exécuter l'intégralité de
+   [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql).
+   Ce script crée les tables `desks` et `bookings`, les contraintes,
+   les policies RLS, active le Realtime et insère les **47 places**.
+3. Vérifier dans **Table Editor** que `desks` contient bien 47 lignes.
+
+> Le script est idempotent (`if not exists` / `on conflict do nothing`) :
+> il peut être ré-exécuté sans risque.
+
+### 3. Variables d'environnement
+
+Copier `.env.example` en `.env.local` et renseigner les valeurs du projet
+(Supabase > **Project Settings** > **API**) :
+
+```
+NEXT_PUBLIC_SUPABASE_URL=https://votreprojet.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
+```
+
+`.env.local` est ignoré par git et ne doit **jamais** être commité.
+
+### 4. Lancer en développement
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+L'application est disponible sur <http://localhost:3000>.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Scripts
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Commande         | Rôle                                          |
+| ---------------- | --------------------------------------------- |
+| `npm run dev`    | Serveur de développement                      |
+| `npm run build`  | Build de production (lint + vérification TS)  |
+| `npm run start`  | Sert le build de production                   |
+| `npm run lint`   | ESLint                                        |
 
-## Learn More
+## Déploiement Vercel
 
-To learn more about Next.js, take a look at the following resources:
+1. Importer le dépôt dans Vercel (framework détecté : Next.js).
+2. Renseigner les variables d'environnement `NEXT_PUBLIC_SUPABASE_URL` et
+   `NEXT_PUBLIC_SUPABASE_ANON_KEY` (onglet **Settings > Environment Variables**).
+3. Déployer. Aucune configuration supplémentaire n'est nécessaire.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Plan SVG
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Le plan provient d'un export Excalidraw (`floor-plan-raw.svg`). Le script
+[`scripts/process-svg.mjs`](scripts/process-svg.mjs) :
 
-## Deploy on Vercel
+- identifie les 47 carrés réservables (remplissage orange `#ffd8a8`) ;
+- les associe à leur label de place par proximité géométrique ;
+- transforme les labels en `deskId` Supabase (`OS4.1-1` → `OS4_1-1`) ;
+- injecte `data-desk-id`, `id`, `role`, `tabindex` et un `<title>` sur chaque
+  place, puis écrit `public/floor-plan.svg`.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Excalidraw exporte les formes en `<g>`/`<path>` (et non en `<rect>`) :
+les attributs `data-desk-id` sont donc portés par les `<g>`, et le composant
+`FloorPlan` recolore le `<path class="desk-fill">` interne.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Pour régénérer le plan après une modification de `floor-plan-raw.svg` :
+
+```bash
+node scripts/process-svg.mjs
+```
+
+## Règles métier
+
+- Fenêtre de réservation : semaine courante + 2 semaines (15 jours ouvrés).
+- Réservation à la **demi-journée** (`matin` / `après-midi`).
+- Une personne ne peut avoir **qu'une réservation par créneau** (tous bureaux confondus).
+- Une place = **1 personne max** par créneau (contrainte SQL `unique`).
+- Pas de week-end. Jours fériés non bloqués en V1.
+- Identification par **prénom libre** mémorisé en `localStorage`
+  (matching insensible à la casse).
+
+## Structure
+
+```
+src/
+  app/
+    page.tsx                  Plan + réservation
+    mes-reservations/page.tsx Réservations à venir de l'utilisateur
+    layout.tsx · globals.css
+  components/
+    FloorPlan · WeekDayPicker · SlotToggle
+    BookingModal · NamePromptModal · OccupantsTable · Header
+    ui/                       Composants shadcn/ui
+  lib/
+    supabase.ts               Client Supabase
+    booking-rules.ts          Logique métier pure (testable)
+    use-current-user.ts       Hook pseudo / localStorage
+  types/database.ts           Types Desk / Booking
+supabase/migrations/0001_init.sql
+scripts/process-svg.mjs       Traitement du plan SVG
+public/floor-plan.svg         Plan traité (généré)
+```
+
+## Notes
+
+- Aucune donnée personnelle sensible n'est stockée : uniquement des prénoms
+  saisis librement.
+- RLS activée : `desks` en lecture seule, `bookings` en select/insert/delete
+  pour le rôle `anon`.
+- Realtime Supabase activé sur `bookings` : les réservations des collègues
+  apparaissent sans rechargement.

@@ -1,101 +1,281 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { format } from 'date-fns';
+import { fr } from 'date-fns/locale';
+import { toast } from 'sonner';
+
+import { BookingModal, type BookingMode } from '@/components/BookingModal';
+import { FloorPlan } from '@/components/FloorPlan';
+import { Header } from '@/components/Header';
+import { NamePromptModal } from '@/components/NamePromptModal';
+import { OccupantsTable } from '@/components/OccupantsTable';
+import { SlotToggle } from '@/components/SlotToggle';
+import { WeekDayPicker } from '@/components/WeekDayPicker';
+import {
+  canBook,
+  getDeskBooking,
+  getDeskStatus,
+  getReservableDates,
+  toDateKey,
+} from '@/lib/booking-rules';
+import { supabase } from '@/lib/supabase';
+import { useCurrentUser } from '@/lib/use-current-user';
+import type { Booking, Desk, Slot } from '@/types/database';
+
+interface ModalState {
+  desk: Desk;
+  mode: BookingMode;
+}
+
+/** Date selectionnee par defaut : aujourd'hui si reservable, sinon le 1er jour de la fenetre. */
+function defaultDate(): Date {
+  const dates = getReservableDates();
+  const todayKey = toDateKey(new Date());
+  return dates.find((d) => toDateKey(d) === todayKey) ?? dates[0];
+}
+
+export default function HomePage() {
+  const { userName, setUserName, loaded } = useCurrentUser();
+
+  const [desks, setDesks] = useState<Desk[]>([]);
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [selectedDate, setSelectedDate] = useState<Date>(() => new Date());
+  const [slot, setSlot] = useState<Slot>('morning');
+  const [mounted, setMounted] = useState(false);
+
+  const [modal, setModal] = useState<ModalState | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [namePromptOpen, setNamePromptOpen] = useState(false);
+
+  // Bornes de la fenetre de reservation (3 semaines).
+  const { firstKey, lastKey } = useMemo(() => {
+    const dates = getReservableDates();
+    return {
+      firstKey: toDateKey(dates[0]),
+      lastKey: toDateKey(dates[dates.length - 1]),
+    };
+  }, []);
+
+  // Initialisation cote client (evite tout decalage d'hydratation sur les dates).
+  useEffect(() => {
+    setSelectedDate(defaultDate());
+    setSlot(new Date().getHours() < 13 ? 'morning' : 'afternoon');
+    setMounted(true);
+  }, []);
+
+  // Chargement des places (une fois).
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const { data, error } = await supabase
+        .from('desks')
+        .select('*')
+        .order('display_order');
+      if (!active) return;
+      if (error) {
+        toast.error('Impossible de charger les places.');
+        return;
+      }
+      setDesks((data ?? []) as Desk[]);
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Chargement des reservations de la fenetre.
+  const refreshBookings = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('bookings')
+      .select('*')
+      .gte('date', firstKey)
+      .lte('date', lastKey);
+    if (error) {
+      toast.error('Impossible de charger les reservations.');
+      return;
+    }
+    setBookings((data ?? []) as Booking[]);
+  }, [firstKey, lastKey]);
+
+  useEffect(() => {
+    void refreshBookings();
+  }, [refreshBookings]);
+
+  // Realtime : toute modification de bookings declenche un rafraichissement.
+  useEffect(() => {
+    const channel = supabase
+      .channel('bookings-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'bookings' },
+        () => {
+          void refreshBookings();
+        },
+      )
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [refreshBookings]);
+
+  const needsName = loaded && userName.trim() === '';
+
+  const handleDeskClick = useCallback(
+    (deskId: string) => {
+      const desk = desks.find((d) => d.id === deskId);
+      if (!desk) return;
+      if (userName.trim() === '') {
+        setNamePromptOpen(true);
+        return;
+      }
+      const status = getDeskStatus({
+        deskId,
+        date: selectedDate,
+        slot,
+        bookings,
+        currentUserName: userName,
+      });
+      if (status === 'free') {
+        setModal({ desk, mode: 'book' });
+      } else if (status === 'mine') {
+        setModal({ desk, mode: 'cancel' });
+      } else {
+        const booking = getDeskBooking({
+          deskId,
+          date: selectedDate,
+          slot,
+          bookings,
+        });
+        toast.info(`Place occupee par ${booking?.user_name ?? 'un collegue'}.`);
+      }
+    },
+    [desks, userName, selectedDate, slot, bookings],
+  );
+
+  const handleConfirm = useCallback(async () => {
+    if (!modal) return;
+    setSubmitting(true);
+    try {
+      if (modal.mode === 'book') {
+        const check = canBook({
+          userName,
+          date: selectedDate,
+          slot,
+          existingBookings: bookings,
+        });
+        if (!check.ok) {
+          toast.error(check.reason);
+          return;
+        }
+        const { error } = await supabase.from('bookings').insert({
+          desk_id: modal.desk.id,
+          date: toDateKey(selectedDate),
+          slot,
+          user_name: userName.trim(),
+        });
+        if (error) {
+          toast.error(
+            error.code === '23505'
+              ? "Cette place vient d'etre prise par quelqu'un d'autre."
+              : 'La reservation a echoue, reessaie.',
+          );
+        } else {
+          toast.success(`${modal.desk.label} reserve.`);
+        }
+      } else {
+        const booking = getDeskBooking({
+          deskId: modal.desk.id,
+          date: selectedDate,
+          slot,
+          bookings,
+        });
+        if (booking) {
+          const { error } = await supabase
+            .from('bookings')
+            .delete()
+            .eq('id', booking.id);
+          if (error) {
+            toast.error("L'annulation a echoue, reessaie.");
+          } else {
+            toast.success('Reservation annulee.');
+          }
+        }
+      }
+      await refreshBookings();
+    } finally {
+      setSubmitting(false);
+      setModal(null);
+    }
+  }, [modal, userName, selectedDate, slot, bookings, refreshBookings]);
+
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+    <div className="min-h-screen">
+      <Header userName={userName} onChangeName={() => setNamePromptOpen(true)} />
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
+      <main className="mx-auto max-w-7xl space-y-6 px-4 py-6">
+        {mounted ? (
+          <>
+            <section className="space-y-3">
+              <WeekDayPicker
+                selectedDate={selectedDate}
+                onSelect={setSelectedDate}
+              />
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-sm font-medium capitalize">
+                  {format(selectedDate, 'EEEE d MMMM yyyy', { locale: fr })}
+                </p>
+                <SlotToggle slot={slot} onChange={setSlot} />
+              </div>
+            </section>
+
+            <FloorPlan
+              bookings={bookings}
+              currentUserName={userName}
+              date={selectedDate}
+              slot={slot}
+              onDeskClick={handleDeskClick}
             />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
+
+            <OccupantsTable
+              desks={desks}
+              bookings={bookings}
+              date={selectedDate}
+              slot={slot}
+              currentUserName={userName}
+              onDeskClick={handleDeskClick}
+            />
+          </>
+        ) : (
+          <p className="py-12 text-center text-sm text-muted-foreground">
+            Chargement...
+          </p>
+        )}
       </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+
+      <BookingModal
+        open={modal !== null}
+        onOpenChange={(open) => {
+          if (!open) setModal(null);
+        }}
+        desk={modal?.desk ?? null}
+        date={selectedDate}
+        slot={slot}
+        mode={modal?.mode ?? 'book'}
+        onConfirm={() => void handleConfirm()}
+        submitting={submitting}
+      />
+
+      <NamePromptModal
+        open={needsName || namePromptOpen}
+        dismissible={!needsName}
+        initialName={userName}
+        onOpenChange={setNamePromptOpen}
+        onSubmit={(name) => {
+          setUserName(name);
+          setNamePromptOpen(false);
+        }}
+      />
     </div>
   );
 }
