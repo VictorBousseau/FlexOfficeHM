@@ -136,6 +136,22 @@ export function FloorPlan({
         : `${deskId} — libre`;
       if (title) title.textContent = text;
       group.setAttribute('aria-label', text);
+
+      // Affiche le nom de l'occupant sur la place (ou l'identifiant si libre).
+      const label = container.querySelector<SVGTextElement>(
+        `[data-desk-label="${deskId}"] text`,
+      );
+      if (label) {
+        if (booking) {
+          label.textContent = booking.user_name;
+          label.style.fontSize = '13px';
+          label.style.fontWeight = '600';
+        } else {
+          label.textContent = deskId.replace('_', '.');
+          label.style.fontSize = '';
+          label.style.fontWeight = '';
+        }
+      }
     });
   }, [bookings, currentUserName, date, slot, state]);
 
@@ -154,7 +170,7 @@ export function FloorPlan({
         )}
         <div
           ref={containerRef}
-          className="min-w-[1500px]"
+          className="floor-plan min-w-[1500px]"
           role="group"
           aria-label="Plan interactif du 3eme etage"
         />

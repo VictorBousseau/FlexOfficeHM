@@ -18,9 +18,6 @@ export function Header({ userName, onChangeName }: HeaderProps) {
           <h1 className="text-lg font-bold leading-tight">
             Flex Office — 3eme etage Rennes
           </h1>
-          <p className="text-xs text-muted-foreground">
-            Distribution &amp; Performance Commerciale
-          </p>
         </div>
         <nav className="flex flex-wrap items-center gap-2">
           <Button asChild variant="ghost" size="sm">

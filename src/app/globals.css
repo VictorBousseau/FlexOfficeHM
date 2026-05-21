@@ -36,6 +36,12 @@
   }
 }
 
+/* Plan SVG : les textes ne doivent pas intercepter les clics,
+   afin que toute la surface d'une place reste cliquable. */
+.floor-plan text {
+  pointer-events: none;
+}
+
 /* Places reservables du plan SVG */
 .desk {
   transition: opacity 0.12s ease;

@@ -30,7 +30,7 @@ for (const m of raw.matchAll(TEXT_RE)) {
   const ty = parseFloat(m[2]);
   const cx = parseFloat(m[4]);
   const cy = parseFloat(m[5]);
-  labels.push({ text: m[6].trim(), x: tx + cx, y: ty + cy });
+  labels.push({ text: m[6].trim(), x: tx + cx, y: ty + cy, full: m[0] });
 }
 
 // --- 2. Filtrage des labels de place ----------------------------------------
@@ -85,7 +85,13 @@ for (const o of oranges) {
     );
   }
   usedLabels.add(deskId);
-  assignments.push({ full: o.full, deskId, label: best.text, dist: bestDist });
+  assignments.push({
+    full: o.full,
+    labelFull: best.full,
+    deskId,
+    label: best.text,
+    dist: bestDist,
+  });
 }
 
 // --- 6. Verification des 47 deskIds attendus --------------------------------
@@ -132,6 +138,14 @@ for (const a of assignments) {
   // <title> vide pour le tooltip natif (mis a jour par FloorPlan)
   const withTitle = withFill.replace(/>/, '><title></title>');
   out = out.replace(a.full, withTitle);
+
+  // Tag du <g> du label texte : permet a FloorPlan d'y afficher le nom
+  // de l'occupant a la place de l'identifiant.
+  const labelTagged = a.labelFull.replace(
+    '<g transform=',
+    `<g data-desk-label="${escId}" transform=`,
+  );
+  out = out.replace(a.labelFull, labelTagged);
 }
 
 // SVG responsive : on conserve viewBox, on retire width/height fixes
