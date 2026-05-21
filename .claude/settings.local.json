@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($f = \"C:\\\\Users\\\\Victor\\\\Documents\\\\Victor\\\\Projets\\\\Outils_résa_3ème\\\\floor-plan-raw.svg\"; $c = Get-Content $f -Raw; \"Length chars: $\\($c.Length\\)\"; \"Lines: $\\(\\(Get-Content $f\\).Count\\)\"; \"First 600 chars:\"; $c.Substring\\(0,[Math]::Min\\(600,$c.Length\\)\\))",
+      "PowerShell($f = \"C:\\\\Users\\\\Victor\\\\Documents\\\\Victor\\\\Projets\\\\Outils_résa_3ème\\\\floor-plan-raw.svg\"; $c = Get-Content $f -Raw; $body = $c.Substring\\(5937\\); $body.Substring\\(0,2500\\))",
+      "PowerShell($f = \"C:\\\\Users\\\\Victor\\\\Documents\\\\Victor\\\\Projets\\\\Outils_résa_3ème\\\\floor-plan-raw.svg\"; $c = Get-Content $f -Raw; [regex]::Matches\\($c,'fill=\"\\(#[0-9a-fA-F]{3,8}\\)\"'\\) | ForEach-Object { $_.Groups[1].Value } | Group-Object | Sort-Object Count -Descending | Format-Table Count,Name -AutoSize)",
+      "PowerShell(node --version)",
+      "PowerShell(npm --version)",
+      "PowerShell(\"--- dir ---\")",
+      "Bash(git check-ignore *)",
+      "mcp__Claude_Preview__preview_start"
+    ]
+  }
+}
