@@ -2,43 +2,51 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-import { getDeskBooking, getDeskStatus } from '@/lib/booking-rules';
-import type { Booking, Slot } from '@/types/database';
+import { getDeskDay } from '@/lib/booking-rules';
+import type { Booking } from '@/types/database';
 
 interface FloorPlanProps {
   bookings: Booking[];
   currentUserName: string;
   date: Date;
-  slot: Slot;
   onDeskClick: (deskId: string) => void;
 }
 
-type DeskStatus = 'free' | 'mine' | 'occupied';
+type Status = 'free' | 'mine' | 'occupied';
 
-const FILL: Record<DeskStatus, string> = {
+const FILL: Record<Status, string> = {
   free: '#bbf7d0',
   mine: '#bfdbfe',
   occupied: '#fecaca',
 };
 
-const STROKE: Record<DeskStatus, string> = {
+const STROKE: Record<Status, string> = {
   free: '#16a34a',
   mine: '#2563eb',
   occupied: '#dc2626',
 };
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+// Combinaisons matin/apres-midi differentes -> degrade scinde en deux.
+const MIXED: ReadonlyArray<readonly [Status, Status]> = [
+  ['free', 'mine'],
+  ['free', 'occupied'],
+  ['mine', 'free'],
+  ['mine', 'occupied'],
+  ['occupied', 'free'],
+  ['occupied', 'mine'],
+];
+
 export function FloorPlan({
   bookings,
   currentUserName,
   date,
-  slot,
   onDeskClick,
 }: FloorPlanProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
 
-  // La callback peut changer d'identite a chaque rendu : on la garde dans un
-  // ref pour que le listener delegue (attache une seule fois) reste a jour.
   const onDeskClickRef = useRef(onDeskClick);
   onDeskClickRef.current = onDeskClick;
 
@@ -53,8 +61,7 @@ export function FloorPlan({
       .then((text) => {
         if (cancelled || !containerRef.current) return;
         const start = text.indexOf('<svg');
-        containerRef.current.innerHTML =
-          start >= 0 ? text.slice(start) : text;
+        containerRef.current.innerHTML = start >= 0 ? text.slice(start) : text;
         const svg = containerRef.current.querySelector('svg');
         if (svg) {
           svg.setAttribute('width', '100%');
@@ -62,6 +69,30 @@ export function FloorPlan({
           svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
           svg.style.height = 'auto';
           svg.style.display = 'block';
+
+          // Degrades pour les places reservees sur une seule demi-journee :
+          // moitie gauche = matin, moitie droite = apres-midi.
+          let defs = svg.querySelector('defs');
+          if (!defs) {
+            defs = document.createElementNS(SVG_NS, 'defs');
+            svg.insertBefore(defs, svg.firstChild);
+          }
+          for (const [morning, afternoon] of MIXED) {
+            const grad = document.createElementNS(SVG_NS, 'linearGradient');
+            grad.setAttribute('id', `split-${morning}-${afternoon}`);
+            grad.setAttribute('x1', '0');
+            grad.setAttribute('y1', '0');
+            grad.setAttribute('x2', '1');
+            grad.setAttribute('y2', '0');
+            const stopA = document.createElementNS(SVG_NS, 'stop');
+            stopA.setAttribute('offset', '50%');
+            stopA.setAttribute('stop-color', FILL[morning]);
+            const stopB = document.createElementNS(SVG_NS, 'stop');
+            stopB.setAttribute('offset', '50%');
+            stopB.setAttribute('stop-color', FILL[afternoon]);
+            grad.append(stopA, stopB);
+            defs.append(grad);
+          }
         }
         setState('ready');
       })
@@ -73,17 +104,15 @@ export function FloorPlan({
     };
   }, []);
 
-  // 2. Listeners delegues (clic + clavier), attaches une fois le SVG pret.
+  // 2. Listeners delegues (clic + clavier).
   useEffect(() => {
     const container = containerRef.current;
     if (!container || state !== 'ready') return;
 
     const deskFromEvent = (target: EventTarget | null): string | null => {
       if (!(target instanceof Element)) return null;
-      const desk = target.closest('[data-desk-id]');
-      return desk?.getAttribute('data-desk-id') ?? null;
+      return target.closest('[data-desk-id]')?.getAttribute('data-desk-id') ?? null;
     };
-
     const handleClick = (event: MouseEvent) => {
       const id = deskFromEvent(event.target);
       if (id) onDeskClickRef.current(id);
@@ -115,35 +144,34 @@ export function FloorPlan({
       const deskId = group.getAttribute('data-desk-id');
       if (!deskId) return;
 
-      const status = getDeskStatus({
-        deskId,
-        date,
-        slot,
-        bookings,
-        currentUserName,
-      });
-      const booking = getDeskBooking({ deskId, date, slot, bookings });
+      const day = getDeskDay({ deskId, date, bookings, currentUserName });
+      const m = day.morning.status;
+      const a = day.afternoon.status;
 
       const fill = group.querySelector('.desk-fill');
-      if (fill) fill.setAttribute('fill', FILL[status]);
-
+      if (fill) {
+        fill.setAttribute(
+          'fill',
+          m === a ? FILL[m] : `url(#split-${m}-${a})`,
+        );
+      }
       const outline = group.querySelector('path:not(.desk-fill)');
-      if (outline) outline.setAttribute('stroke', STROKE[status]);
+      if (outline) {
+        outline.setAttribute('stroke', m === a ? STROKE[m] : '#334155');
+      }
 
-      const title = group.querySelector('title');
-      const text = booking
-        ? `${deskId} — occupe par ${booking.user_name}`
-        : `${deskId} — libre`;
-      if (title) title.textContent = text;
-      group.setAttribute('aria-label', text);
-
-      // Affiche le nom de l'occupant sur la place (ou l'identifiant si libre).
+      // Libelle : nom de l'occupant s'il est unique, sinon l'identifiant.
+      const names = [
+        day.morning.booking?.user_name,
+        day.afternoon.booking?.user_name,
+      ].filter((n): n is string => Boolean(n));
+      const distinct = [...new Set(names)];
       const label = container.querySelector<SVGTextElement>(
         `[data-desk-label="${deskId}"] text`,
       );
       if (label) {
-        if (booking) {
-          label.textContent = booking.user_name;
+        if (distinct.length === 1) {
+          label.textContent = distinct[0];
           label.style.fontSize = '13px';
           label.style.fontWeight = '600';
         } else {
@@ -152,8 +180,16 @@ export function FloorPlan({
           label.style.fontWeight = '';
         }
       }
+
+      // Tooltip natif + accessibilite.
+      const slotText = (s: typeof day.morning): string =>
+        s.booking ? s.booking.user_name : 'libre';
+      const text = `${deskId} — Matin : ${slotText(day.morning)} · Apres-midi : ${slotText(day.afternoon)}`;
+      const title = group.querySelector('title');
+      if (title) title.textContent = text;
+      group.setAttribute('aria-label', text);
     });
-  }, [bookings, currentUserName, date, slot, state]);
+  }, [bookings, currentUserName, date, state]);
 
   return (
     <div className="space-y-3">
@@ -170,7 +206,7 @@ export function FloorPlan({
         )}
         <div
           ref={containerRef}
-          className="floor-plan min-w-[1500px]"
+          className="floor-plan min-w-[2100px]"
           role="group"
           aria-label="Plan interactif du 3eme etage"
         />
@@ -179,18 +215,30 @@ export function FloorPlan({
         <LegendItem color={FILL.free} label="Libre" />
         <LegendItem color={FILL.mine} label="Ma reservation" />
         <LegendItem color={FILL.occupied} label="Occupee" />
+        <LegendItem
+          label="Demi-journee (matin / apres-midi)"
+          gradient={`linear-gradient(90deg, ${FILL.free} 50%, ${FILL.occupied} 50%)`}
+        />
         <LegendItem color="#868e96" label="Non reservable" />
       </div>
     </div>
   );
 }
 
-function LegendItem({ color, label }: { color: string; label: string }) {
+function LegendItem({
+  color,
+  gradient,
+  label,
+}: {
+  color?: string;
+  gradient?: string;
+  label: string;
+}) {
   return (
     <span className="flex items-center gap-2">
       <span
         className="inline-block h-4 w-4 rounded border"
-        style={{ backgroundColor: color }}
+        style={gradient ? { backgroundImage: gradient } : { backgroundColor: color }}
       />
       {label}
     </span>

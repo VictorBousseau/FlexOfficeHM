@@ -126,3 +126,33 @@ export function getGroupOccupancy(params: {
   ).length;
   return { occupied, total: groupDeskIds.size };
 }
+
+/** Etat d'une demi-journee pour une place. */
+export interface SlotState {
+  status: 'free' | 'mine' | 'occupied';
+  booking?: Booking;
+}
+
+/** Etat d'une place sur la journee complete (matin + apres-midi). */
+export interface DeskDay {
+  morning: SlotState;
+  afternoon: SlotState;
+}
+
+/** Calcule l'etat matin + apres-midi d'une place pour une date donnee. */
+export function getDeskDay(params: {
+  deskId: string;
+  date: Date;
+  bookings: Booking[];
+  currentUserName: string;
+}): DeskDay {
+  const { deskId, date, bookings, currentUserName } = params;
+  const me = normalizeName(currentUserName);
+  const build = (slot: Slot): SlotState => {
+    const booking = getDeskBooking({ deskId, date, slot, bookings });
+    if (!booking) return { status: 'free' };
+    const mine = normalizeName(booking.user_name) === me;
+    return { status: mine ? 'mine' : 'occupied', booking };
+  };
+  return { morning: build('morning'), afternoon: build('afternoon') };
+}

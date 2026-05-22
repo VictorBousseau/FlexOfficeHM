@@ -8,7 +8,9 @@
       "PowerShell(npm --version)",
       "PowerShell(\"--- dir ---\")",
       "Bash(git check-ignore *)",
-      "mcp__Claude_Preview__preview_start"
+      "mcp__Claude_Preview__preview_start",
+      "Bash(rm src/components/SlotToggle.tsx)",
+      "Bash(grep -rl \"SlotToggle\" src)"
     ]
   }
 }

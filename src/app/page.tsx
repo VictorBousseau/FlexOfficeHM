@@ -5,28 +5,22 @@ import { format } from 'date-fns';
 import { fr } from 'date-fns/locale';
 import { toast } from 'sonner';
 
-import { BookingModal, type BookingMode } from '@/components/BookingModal';
+import { BookingModal, type ActionTarget } from '@/components/BookingModal';
 import { FloorPlan } from '@/components/FloorPlan';
 import { Header } from '@/components/Header';
 import { NamePromptModal } from '@/components/NamePromptModal';
 import { OccupantsTable } from '@/components/OccupantsTable';
-import { SlotToggle } from '@/components/SlotToggle';
 import { WeekDayPicker } from '@/components/WeekDayPicker';
 import {
   canBook,
   getDeskBooking,
-  getDeskStatus,
+  getDeskDay,
   getReservableDates,
   toDateKey,
 } from '@/lib/booking-rules';
 import { supabase } from '@/lib/supabase';
 import { useCurrentUser } from '@/lib/use-current-user';
 import type { Booking, Desk, Slot } from '@/types/database';
-
-interface ModalState {
-  desk: Desk;
-  mode: BookingMode;
-}
 
 /** Date selectionnee par defaut : aujourd'hui si reservable, sinon le 1er jour de la fenetre. */
 function defaultDate(): Date {
@@ -41,10 +35,9 @@ export default function HomePage() {
   const [desks, setDesks] = useState<Desk[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [selectedDate, setSelectedDate] = useState<Date>(() => new Date());
-  const [slot, setSlot] = useState<Slot>('morning');
   const [mounted, setMounted] = useState(false);
 
-  const [modal, setModal] = useState<ModalState | null>(null);
+  const [modalDesk, setModalDesk] = useState<Desk | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [namePromptOpen, setNamePromptOpen] = useState(false);
 
@@ -60,7 +53,6 @@ export default function HomePage() {
   // Initialisation cote client (evite tout decalage d'hydratation sur les dates).
   useEffect(() => {
     setSelectedDate(defaultDate());
-    setSlot(new Date().getHours() < 13 ? 'morning' : 'afternoon');
     setMounted(true);
   }, []);
 
@@ -129,85 +121,92 @@ export default function HomePage() {
         setNamePromptOpen(true);
         return;
       }
-      const status = getDeskStatus({
-        deskId,
-        date: selectedDate,
-        slot,
-        bookings,
-        currentUserName: userName,
-      });
-      if (status === 'free') {
-        setModal({ desk, mode: 'book' });
-      } else if (status === 'mine') {
-        setModal({ desk, mode: 'cancel' });
-      } else {
-        const booking = getDeskBooking({
-          deskId,
-          date: selectedDate,
-          slot,
-          bookings,
-        });
-        toast.info(`Place occupee par ${booking?.user_name ?? 'un collegue'}.`);
-      }
+      setModalDesk(desk);
     },
-    [desks, userName, selectedDate, slot, bookings],
+    [desks, userName],
   );
 
-  const handleConfirm = useCallback(async () => {
-    if (!modal) return;
-    setSubmitting(true);
-    try {
-      if (modal.mode === 'book') {
-        const check = canBook({
-          userName,
-          date: selectedDate,
-          slot,
-          existingBookings: bookings,
-        });
-        if (!check.ok) {
-          toast.error(check.reason);
-          return;
-        }
-        const { error } = await supabase.from('bookings').insert({
-          desk_id: modal.desk.id,
-          date: toDateKey(selectedDate),
-          slot,
-          user_name: userName.trim(),
-        });
-        if (error) {
-          toast.error(
-            error.code === '23505'
-              ? "Cette place vient d'etre prise par quelqu'un d'autre."
-              : 'La reservation a echoue, reessaie.',
-          );
-        } else {
-          toast.success(`${modal.desk.label} reserve.`);
-        }
-      } else {
-        const booking = getDeskBooking({
-          deskId: modal.desk.id,
-          date: selectedDate,
-          slot,
-          bookings,
-        });
-        if (booking) {
-          const { error } = await supabase
-            .from('bookings')
-            .delete()
-            .eq('id', booking.id);
+  // Etat journee de la place affichee dans la modale.
+  const modalDay = useMemo(() => {
+    if (!modalDesk) return null;
+    return getDeskDay({
+      deskId: modalDesk.id,
+      date: selectedDate,
+      bookings,
+      currentUserName: userName,
+    });
+  }, [modalDesk, selectedDate, bookings, userName]);
+
+  const handleAction = useCallback(
+    async (target: ActionTarget, action: 'book' | 'cancel') => {
+      if (!modalDesk) return;
+      const deskId = modalDesk.id;
+      const slots: Slot[] =
+        target === 'day' ? ['morning', 'afternoon'] : [target];
+
+      setSubmitting(true);
+      try {
+        if (action === 'book') {
+          for (const slot of slots) {
+            const check = canBook({
+              userName,
+              date: selectedDate,
+              slot,
+              existingBookings: bookings,
+            });
+            if (!check.ok) {
+              toast.error(check.reason);
+              return;
+            }
+          }
+          const rows = slots.map((slot) => ({
+            desk_id: deskId,
+            date: toDateKey(selectedDate),
+            slot,
+            user_name: userName.trim(),
+          }));
+          const { error } = await supabase.from('bookings').insert(rows);
           if (error) {
-            toast.error("L'annulation a echoue, reessaie.");
+            toast.error(
+              error.code === '23505'
+                ? "Cette place vient d'etre prise par quelqu'un d'autre."
+                : 'La reservation a echoue, reessaie.',
+            );
           } else {
-            toast.success('Reservation annulee.');
+            toast.success(
+              target === 'day'
+                ? `${modalDesk.label} reserve pour la journee.`
+                : `${modalDesk.label} reserve.`,
+            );
+          }
+        } else {
+          const ids = slots
+            .map(
+              (slot) =>
+                getDeskBooking({ deskId, date: selectedDate, slot, bookings })
+                  ?.id,
+            )
+            .filter((id): id is string => Boolean(id));
+          if (ids.length > 0) {
+            const { error } = await supabase
+              .from('bookings')
+              .delete()
+              .in('id', ids);
+            if (error) {
+              toast.error("L'annulation a echoue, reessaie.");
+            } else {
+              toast.success('Reservation annulee.');
+            }
           }
         }
+        await refreshBookings();
+      } finally {
+        setSubmitting(false);
+        setModalDesk(null);
       }
-      await refreshBookings();
-    } finally {
-      setSubmitting(false);
-      setModal(null);
-    }
-  }, [modal, userName, selectedDate, slot, bookings, refreshBookings]);
+    },
+    [modalDesk, userName, selectedDate, bookings, refreshBookings],
+  );
 
   return (
     <div className="min-h-screen">
@@ -216,24 +215,24 @@ export default function HomePage() {
       <main className="mx-auto max-w-7xl space-y-6 px-4 py-6">
         {mounted ? (
           <>
-            <section className="space-y-3">
+            <section className="space-y-2">
               <WeekDayPicker
                 selectedDate={selectedDate}
                 onSelect={setSelectedDate}
               />
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-sm font-medium capitalize">
-                  {format(selectedDate, 'EEEE d MMMM yyyy', { locale: fr })}
-                </p>
-                <SlotToggle slot={slot} onChange={setSlot} />
-              </div>
+              <p className="text-sm font-medium capitalize">
+                {format(selectedDate, 'EEEE d MMMM yyyy', { locale: fr })}
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Clique une place du plan pour reserver la journee entiere ou
+                une demi-journee.
+              </p>
             </section>
 
             <FloorPlan
               bookings={bookings}
               currentUserName={userName}
               date={selectedDate}
-              slot={slot}
               onDeskClick={handleDeskClick}
             />
 
@@ -241,7 +240,6 @@ export default function HomePage() {
               desks={desks}
               bookings={bookings}
               date={selectedDate}
-              slot={slot}
               currentUserName={userName}
               onDeskClick={handleDeskClick}
             />
@@ -254,15 +252,14 @@ export default function HomePage() {
       </main>
 
       <BookingModal
-        open={modal !== null}
+        open={modalDesk !== null}
         onOpenChange={(open) => {
-          if (!open) setModal(null);
+          if (!open) setModalDesk(null);
         }}
-        desk={modal?.desk ?? null}
+        desk={modalDesk}
         date={selectedDate}
-        slot={slot}
-        mode={modal?.mode ?? 'book'}
-        onConfirm={() => void handleConfirm()}
+        day={modalDay}
+        onAction={(target, action) => void handleAction(target, action)}
         submitting={submitting}
       />
 

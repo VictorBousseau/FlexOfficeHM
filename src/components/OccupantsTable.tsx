@@ -2,17 +2,16 @@
 
 import { Button } from '@/components/ui/button';
 import {
-  getDeskBooking,
-  getDeskStatus,
+  getDeskDay,
   getGroupOccupancy,
+  type SlotState,
 } from '@/lib/booking-rules';
-import type { Booking, Desk, DeskKind, Slot } from '@/types/database';
+import type { Booking, Desk, DeskKind } from '@/types/database';
 
 interface OccupantsTableProps {
   desks: Desk[];
   bookings: Booking[];
   date: Date;
-  slot: Slot;
   currentUserName: string;
   onDeskClick: (deskId: string) => void;
 }
@@ -32,11 +31,21 @@ function orderedGroups(desks: Desk[]): string[] {
   return groups;
 }
 
+function SlotCell({ state }: { state: SlotState }) {
+  if (!state.booking) {
+    return <span className="text-muted-foreground">Libre</span>;
+  }
+  return (
+    <span className={state.status === 'mine' ? 'font-medium text-blue-700' : ''}>
+      {state.booking.user_name}
+    </span>
+  );
+}
+
 export function OccupantsTable({
   desks,
   bookings,
   date,
-  slot,
   currentUserName,
   onDeskClick,
 }: OccupantsTableProps) {
@@ -49,49 +58,57 @@ export function OccupantsTable({
         return (
           <section key={section.kind}>
             <h3 className="mb-3 text-lg font-semibold">{section.title}</h3>
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-4 lg:grid-cols-2">
               {orderedGroups(sectionDesks).map((group) => {
                 const groupDesks = sectionDesks.filter(
                   (d) => d.bureau_group === group,
                 );
-                const occ = getGroupOccupancy({
+                const occM = getGroupOccupancy({
                   bureauGroup: group,
                   date,
-                  slot,
+                  slot: 'morning',
                   desks,
                   bookings,
                 });
-                const full = occ.occupied === occ.total;
+                const occA = getGroupOccupancy({
+                  bureauGroup: group,
+                  date,
+                  slot: 'afternoon',
+                  desks,
+                  bookings,
+                });
 
                 return (
                   <div key={group} className="overflow-hidden rounded-lg border">
-                    <div className="flex items-center justify-between border-b bg-muted/50 px-3 py-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/50 px-3 py-2">
                       <span className="font-medium">{group}</span>
-                      <span
-                        className={
-                          full
-                            ? 'text-sm font-medium text-destructive'
-                            : 'text-sm text-muted-foreground'
-                        }
-                      >
-                        {occ.occupied}/{occ.total} occupe
+                      <span className="text-xs text-muted-foreground">
+                        Matin {occM.occupied}/{occM.total} · Apres-midi{' '}
+                        {occA.occupied}/{occA.total}
                       </span>
                     </div>
                     <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b text-xs text-muted-foreground">
+                          <th className="px-3 py-1.5 text-left font-medium">
+                            Place
+                          </th>
+                          <th className="px-3 py-1.5 text-left font-medium">
+                            Matin
+                          </th>
+                          <th className="px-3 py-1.5 text-left font-medium">
+                            Apres-midi
+                          </th>
+                          <th className="px-3 py-1.5" />
+                        </tr>
+                      </thead>
                       <tbody>
                         {groupDesks.map((desk) => {
-                          const status = getDeskStatus({
+                          const day = getDeskDay({
                             deskId: desk.id,
                             date,
-                            slot,
                             bookings,
                             currentUserName,
-                          });
-                          const booking = getDeskBooking({
-                            deskId: desk.id,
-                            date,
-                            slot,
-                            bookings,
                           });
                           return (
                             <tr
@@ -100,46 +117,19 @@ export function OccupantsTable({
                             >
                               <td className="px-3 py-2">{desk.label}</td>
                               <td className="px-3 py-2">
-                                {booking ? (
-                                  <span
-                                    className={
-                                      status === 'mine'
-                                        ? 'font-medium text-blue-700'
-                                        : 'text-foreground'
-                                    }
-                                  >
-                                    {booking.user_name}
-                                  </span>
-                                ) : (
-                                  <span className="text-muted-foreground">
-                                    Libre
-                                  </span>
-                                )}
+                                <SlotCell state={day.morning} />
+                              </td>
+                              <td className="px-3 py-2">
+                                <SlotCell state={day.afternoon} />
                               </td>
                               <td className="px-3 py-2 text-right">
-                                {status === 'free' && (
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() => onDeskClick(desk.id)}
-                                  >
-                                    Reserver
-                                  </Button>
-                                )}
-                                {status === 'mine' && (
-                                  <Button
-                                    size="sm"
-                                    variant="destructive"
-                                    onClick={() => onDeskClick(desk.id)}
-                                  >
-                                    Annuler
-                                  </Button>
-                                )}
-                                {status === 'occupied' && (
-                                  <span className="text-xs text-muted-foreground">
-                                    Occupe
-                                  </span>
-                                )}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => onDeskClick(desk.id)}
+                                >
+                                  Gerer
+                                </Button>
                               </td>
                             </tr>
                           );
