@@ -33,14 +33,18 @@ npm install
 ### 2. Base de données Supabase
 
 1. Créer un projet sur [supabase.com](https://supabase.com).
-2. Ouvrir **SQL Editor** et exécuter l'intégralité de
-   [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql).
-   Ce script crée les tables `desks` et `bookings`, les contraintes,
-   les policies RLS, active le Realtime et insère les **47 places**.
+2. Ouvrir **SQL Editor** et exécuter, dans l'ordre :
+   - [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql)
+     — tables `desks`/`bookings`, contraintes, RLS, Realtime, seed des
+     **47 places**.
+   - [`supabase/migrations/0002_booking_events.sql`](supabase/migrations/0002_booking_events.sql)
+     — table `booking_events` + triggers qui journalisent automatiquement
+     chaque réservation et chaque annulation (alimente la page
+     **Historique**).
 3. Vérifier dans **Table Editor** que `desks` contient bien 47 lignes.
 
-> Le script est idempotent (`if not exists` / `on conflict do nothing`) :
-> il peut être ré-exécuté sans risque.
+> Les scripts sont idempotents (`if not exists` / `on conflict do nothing`) :
+> ils peuvent être ré-exécutés sans risque.
 
 ### 3. Variables d'environnement
 
@@ -102,31 +106,38 @@ node scripts/process-svg.mjs
 ## Règles métier
 
 - Fenêtre de réservation : semaine courante + 2 semaines (15 jours ouvrés).
-- Réservation à la **demi-journée** (`matin` / `après-midi`).
+- Réservation à la **journée entière** ou à la **demi-journée** (`matin` /
+  `après-midi`). Une journée = deux lignes dans `bookings` (matin + après-midi).
 - Une personne ne peut avoir **qu'une réservation par créneau** (tous bureaux confondus).
 - Une place = **1 personne max** par créneau (contrainte SQL `unique`).
 - Pas de week-end. Jours fériés non bloqués en V1.
 - Identification par **prénom libre** mémorisé en `localStorage`
   (matching insensible à la casse).
+- Toutes les réservations et annulations sont journalisées dans
+  `booking_events` via un trigger Postgres → page **Historique** pour
+  reconstituer la chronologie en cas de conflit.
 
 ## Structure
 
 ```
 src/
   app/
-    page.tsx                  Plan + réservation
+    page.tsx                  Plan + réservation (vue journée)
     mes-reservations/page.tsx Réservations à venir de l'utilisateur
+    historique/page.tsx       Journal des réservations et annulations
     layout.tsx · globals.css
   components/
-    FloorPlan · WeekDayPicker · SlotToggle
+    FloorPlan · WeekDayPicker
     BookingModal · NamePromptModal · OccupantsTable · Header
     ui/                       Composants shadcn/ui
   lib/
     supabase.ts               Client Supabase
     booking-rules.ts          Logique métier pure (testable)
     use-current-user.ts       Hook pseudo / localStorage
-  types/database.ts           Types Desk / Booking
-supabase/migrations/0001_init.sql
+  types/database.ts           Types Desk / Booking / BookingEvent
+supabase/migrations/
+  0001_init.sql               Schéma + 47 places + RLS + Realtime
+  0002_booking_events.sql     Historique (table + triggers)
 scripts/process-svg.mjs       Traitement du plan SVG
 public/floor-plan.svg         Plan traité (généré)
 ```

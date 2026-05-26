@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { CalendarDays, MapPin, UserCog } from 'lucide-react';
+import { CalendarDays, History, MapPin, UserCog } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 
@@ -30,6 +30,12 @@ export function Header({ userName, onChangeName }: HeaderProps) {
             <Link href="/mes-reservations">
               <CalendarDays className="mr-1 h-4 w-4" />
               Mes reservations
+            </Link>
+          </Button>
+          <Button asChild variant="ghost" size="sm">
+            <Link href="/historique">
+              <History className="mr-1 h-4 w-4" />
+              Historique
             </Link>
           </Button>
           <Button variant="outline" size="sm" onClick={onChangeName}>

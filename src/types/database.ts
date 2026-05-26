@@ -25,6 +25,19 @@ export interface Booking {
 /** Payload d'insertion d'une reservation (id + created_at generes par Postgres). */
 export type BookingInsert = Omit<Booking, 'id' | 'created_at'>;
 
+export type BookingEventType = 'booked' | 'cancelled';
+
+/** Evenement journalise par le trigger Postgres sur `bookings`. */
+export interface BookingEvent {
+  id: string;
+  event_type: BookingEventType;
+  desk_id: string;
+  date: string;
+  slot: Slot;
+  user_name: string;
+  event_at: string;
+}
+
 /** Type Database au format attendu par `createClient<Database>()`. */
 export interface Database {
   public: {
