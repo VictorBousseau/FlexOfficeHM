@@ -156,3 +156,157 @@ export function getDeskDay(params: {
   };
   return { morning: build('morning'), afternoon: build('afternoon') };
 }
+
+// ============================================================
+// Privatisation d'une salle de reunion
+//
+// Une salle privatisee n'est pas un objet metier distinct : c'est un LOT de
+// reservations classiques (toutes les places de la salle, meme creneau, meme
+// nom) partageant un `room_booking_id`. La contrainte unique SQL reste donc
+// le garde-fou anti-collision.
+// ============================================================
+
+/** Privatisation en cours sur un creneau. */
+export interface RoomBookingInfo {
+  roomBookingId: string;
+  userName: string;
+  teamLabel: string | null;
+  mine: boolean;
+}
+
+/** Etat d'une salle sur un creneau. */
+export interface RoomSlotState {
+  total: number;
+  occupied: number;
+  /** Renseigne uniquement si TOUTES les places forment un meme lot. */
+  roomBooking?: RoomBookingInfo;
+}
+
+/** Etat d'une salle sur la journee complete. */
+export interface RoomDay {
+  morning: RoomSlotState;
+  afternoon: RoomSlotState;
+}
+
+/** Places d'une salle, dans l'ordre d'affichage. */
+export function getRoomDesks(params: {
+  bureauGroup: string;
+  desks: Desk[];
+}): Desk[] {
+  const { bureauGroup, desks } = params;
+  return desks.filter((d) => d.bureau_group === bureauGroup);
+}
+
+/** Etat matin + apres-midi d'une salle pour une date donnee. */
+export function getRoomDay(params: {
+  bureauGroup: string;
+  date: Date;
+  desks: Desk[];
+  bookings: Booking[];
+  currentUserName: string;
+}): RoomDay {
+  const { bureauGroup, date, desks, bookings, currentUserName } = params;
+  const dateKey = toDateKey(date);
+  const me = normalizeName(currentUserName);
+  const roomDesks = getRoomDesks({ bureauGroup, desks });
+  const roomDeskIds = new Set(roomDesks.map((d) => d.id));
+
+  const build = (slot: Slot): RoomSlotState => {
+    const slotBookings = bookings.filter(
+      (b) => roomDeskIds.has(b.desk_id) && b.date === dateKey && b.slot === slot,
+    );
+    const state: RoomSlotState = {
+      total: roomDesks.length,
+      occupied: slotBookings.length,
+    };
+
+    // Privatisation = toutes les places prises, sur un seul et meme lot.
+    const lot = slotBookings[0]?.room_booking_id ?? null;
+    const isRoom =
+      roomDesks.length > 0 &&
+      slotBookings.length === roomDesks.length &&
+      lot !== null &&
+      slotBookings.every((b) => b.room_booking_id === lot);
+
+    if (isRoom && lot) {
+      const first = slotBookings[0];
+      state.roomBooking = {
+        roomBookingId: lot,
+        userName: first.user_name,
+        teamLabel: first.team_label ?? null,
+        mine: normalizeName(first.user_name) === me,
+      };
+    }
+    return state;
+  };
+
+  return { morning: build('morning'), afternoon: build('afternoon') };
+}
+
+/**
+ * Verifie qu'un utilisateur peut privatiser une salle sur ce creneau.
+ * Reprend les controles de `canBook` — une privatisation consomme le creneau
+ * de la personne au meme titre qu'une place — puis exige que toutes les
+ * places de la salle soient libres.
+ */
+export function canBookRoom(params: {
+  userName: string;
+  date: Date;
+  slot: Slot;
+  roomDesks: Desk[];
+  existingBookings: Booking[];
+}): { ok: true } | { ok: false; reason: string } {
+  const { userName, date, slot, roomDesks, existingBookings } = params;
+
+  const base = canBook({ userName, date, slot, existingBookings });
+  if (!base.ok) return base;
+
+  if (roomDesks.length === 0) {
+    return { ok: false, reason: 'Salle introuvable.' };
+  }
+
+  const dateKey = toDateKey(date);
+  const roomDeskIds = new Set(roomDesks.map((d) => d.id));
+  const taken = existingBookings.filter(
+    (b) => roomDeskIds.has(b.desk_id) && b.date === dateKey && b.slot === slot,
+  ).length;
+
+  if (taken > 0) {
+    const slotLabel = slot === 'morning' ? 'le matin' : "l'apres-midi";
+    return {
+      ok: false,
+      reason: `${taken} place(s) de cette salle sont deja prises ${slotLabel}. Impossible de reserver la salle entiere.`,
+    };
+  }
+  return { ok: true };
+}
+
+/** Lignes de reservation composant une privatisation. */
+export function getRoomBookingRows(params: {
+  roomBookingId: string;
+  bookings: Booking[];
+}): Booking[] {
+  const { roomBookingId, bookings } = params;
+  return bookings.filter((b) => b.room_booking_id === roomBookingId);
+}
+
+/**
+ * Vrai si la place est couverte par une privatisation sur l'un des creneaux.
+ * `Boolean(...)` et non `!== null` : la colonne peut etre absente de la
+ * reponse (migration 0004 pas encore jouee), auquel cas la valeur est
+ * `undefined` et ne doit pas etre lue comme une privatisation.
+ */
+export function isRoomBookedTile(params: {
+  deskId: string;
+  date: Date;
+  bookings: Booking[];
+}): boolean {
+  const { deskId, date, bookings } = params;
+  const dateKey = toDateKey(date);
+  return bookings.some(
+    (b) =>
+      b.desk_id === deskId &&
+      b.date === dateKey &&
+      Boolean(b.room_booking_id),
+  );
+}

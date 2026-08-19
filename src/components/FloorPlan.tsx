@@ -1,11 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { getDeskDay } from '@/lib/booking-rules';
-import type { Booking } from '@/types/database';
+import { getDeskDay, isRoomBookedTile } from '@/lib/booking-rules';
+import { cn } from '@/lib/utils';
+import type { Booking, Desk } from '@/types/database';
 
 interface FloorPlanProps {
+  desks: Desk[];
   bookings: Booking[];
   currentUserName: string;
   date: Date;
@@ -28,6 +30,13 @@ const STROKE: Record<Status, string> = {
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
+// Marqueur double ecran.
+const STAR_GLYPH = '★';
+const STAR_COLOR = '#b45309';
+
+// Liseré des places couvertes par une privatisation de salle.
+const ROOM_DASH = '6 4';
+
 // Combinaisons matin/apres-midi differentes -> degrade scinde en deux.
 const MIXED: ReadonlyArray<readonly [Status, Status]> = [
   ['free', 'mine'],
@@ -39,6 +48,7 @@ const MIXED: ReadonlyArray<readonly [Status, Status]> = [
 ];
 
 export function FloorPlan({
+  desks,
   bookings,
   currentUserName,
   date,
@@ -46,6 +56,12 @@ export function FloorPlan({
 }: FloorPlanProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
+
+  const desksById = useMemo(() => {
+    const map = new Map<string, Desk>();
+    for (const desk of desks) map.set(desk.id, desk);
+    return map;
+  }, [desks]);
 
   const onDeskClickRef = useRef(onDeskClick);
   onDeskClickRef.current = onDeskClick;
@@ -139,6 +155,18 @@ export function FloorPlan({
     const container = containerRef.current;
     if (!container || state !== 'ready') return;
 
+    const svg = container.querySelector('svg');
+    if (svg) {
+      syncDualScreenStars(
+        svg,
+        new Set(
+          [...desksById.values()]
+            .filter((d) => d.has_dual_screen)
+            .map((d) => d.id),
+        ),
+      );
+    }
+
     const desks = container.querySelectorAll<SVGGElement>('[data-desk-id]');
     desks.forEach((group) => {
       const deskId = group.getAttribute('data-desk-id');
@@ -158,9 +186,21 @@ export function FloorPlan({
       const outline = group.querySelector('path:not(.desk-fill)');
       if (outline) {
         outline.setAttribute('stroke', m === a ? STROKE[m] : '#334155');
+        // Liseré pointillé sur les places couvertes par une salle privatisée.
+        if (isRoomBookedTile({ deskId, date, bookings })) {
+          outline.setAttribute('stroke-dasharray', ROOM_DASH);
+        } else {
+          outline.removeAttribute('stroke-dasharray');
+        }
       }
 
-      // Libelle : nom de l'occupant s'il est unique, sinon l'identifiant.
+      // Libelle : equipe si la salle est privatisee, sinon nom de l'occupant
+      // s'il est unique, sinon l'identifiant de la place.
+      const teams = [
+        day.morning.booking?.team_label,
+        day.afternoon.booking?.team_label,
+      ].filter((t): t is string => Boolean(t));
+      const distinctTeams = [...new Set(teams)];
       const names = [
         day.morning.booking?.user_name,
         day.afternoon.booking?.user_name,
@@ -170,8 +210,14 @@ export function FloorPlan({
         `[data-desk-label="${deskId}"] text`,
       );
       if (label) {
-        if (distinct.length === 1) {
-          label.textContent = distinct[0];
+        const custom =
+          distinctTeams.length === 1
+            ? distinctTeams[0]
+            : distinct.length === 1
+              ? distinct[0]
+              : null;
+        if (custom) {
+          label.textContent = custom;
           label.style.fontSize = '13px';
           label.style.fontWeight = '600';
         } else {
@@ -182,14 +228,21 @@ export function FloorPlan({
       }
 
       // Tooltip natif + accessibilite.
-      const slotText = (s: typeof day.morning): string =>
-        s.booking ? s.booking.user_name : 'libre';
-      const text = `${deskId} — Matin : ${slotText(day.morning)} · Apres-midi : ${slotText(day.afternoon)}`;
+      const slotText = (s: typeof day.morning): string => {
+        if (!s.booking) return 'libre';
+        return s.booking.team_label
+          ? `${s.booking.user_name} (salle entiere — ${s.booking.team_label})`
+          : s.booking.user_name;
+      };
+      const dualText = desksById.get(deskId)?.has_dual_screen
+        ? ' · Double ecran'
+        : '';
+      const text = `${deskId} — Matin : ${slotText(day.morning)} · Apres-midi : ${slotText(day.afternoon)}${dualText}`;
       const title = group.querySelector('title');
       if (title) title.textContent = text;
       group.setAttribute('aria-label', text);
     });
-  }, [bookings, currentUserName, date, state]);
+  }, [bookings, currentUserName, date, desksById, state]);
 
   return (
     <div className="space-y-3">
@@ -219,27 +272,140 @@ export function FloorPlan({
           label="Demi-journee (matin / apres-midi)"
           gradient={`linear-gradient(90deg, ${FILL.free} 50%, ${FILL.occupied} 50%)`}
         />
+        <LegendItem dashed label="Salle privatisee" />
+        <LegendItem glyph={STAR_GLYPH} label="Double ecran" />
         <LegendItem color="#868e96" label="Non reservable" />
       </div>
     </div>
   );
 }
 
+/**
+ * Coin visuel haut-droit d'une tuile, exprime dans le repere de `target`.
+ *
+ * Indispensable : une partie des tuiles Excalidraw portent un
+ * `rotate(270 ...)`. Placer l'etoile dans le repere local du groupe la ferait
+ * atterrir dans le mauvais coin et couchee sur le flanc. On projette donc les
+ * quatre coins de la bbox dans le repere de la couche d'etoiles.
+ */
+function topRightIn(
+  target: SVGGraphicsElement,
+  source: SVGGraphicsElement,
+): { x: number; y: number } | null {
+  const from = source.getScreenCTM();
+  const to = target.getScreenCTM();
+  if (!from || !to) return null;
+
+  let box: DOMRect;
+  try {
+    box = source.getBBox();
+  } catch {
+    // getBBox leve si l'element n'est pas encore rendu : on reessaiera au
+    // prochain passage de l'effet.
+    return null;
+  }
+
+  const matrix = to.inverse().multiply(from);
+  const svg = source.ownerSVGElement;
+  if (!svg) return null;
+
+  const corners = [
+    [box.x, box.y],
+    [box.x + box.width, box.y],
+    [box.x, box.y + box.height],
+    [box.x + box.width, box.y + box.height],
+  ].map(([x, y]) => {
+    const point = svg.createSVGPoint();
+    point.x = x;
+    point.y = y;
+    return point.matrixTransform(matrix);
+  });
+
+  return {
+    x: Math.max(...corners.map((c) => c.x)),
+    y: Math.min(...corners.map((c) => c.y)),
+  };
+}
+
+/**
+ * Synchronise les marqueurs double ecran. Les etoiles vivent dans une couche
+ * dediee a la racine du SVG (donc toujours droites et au-dessus des tuiles),
+ * pas dans les groupes de places.
+ */
+function syncDualScreenStars(
+  svg: SVGSVGElement,
+  dualScreenIds: Set<string>,
+): void {
+  let layer = svg.querySelector<SVGGElement>('#desk-stars');
+  if (!layer) {
+    layer = document.createElementNS(SVG_NS, 'g');
+    layer.setAttribute('id', 'desk-stars');
+    svg.append(layer);
+  }
+
+  for (const star of layer.querySelectorAll('[data-star-for]')) {
+    const id = star.getAttribute('data-star-for');
+    if (!id || !dualScreenIds.has(id)) star.remove();
+  }
+
+  for (const deskId of dualScreenIds) {
+    if (layer.querySelector(`[data-star-for="${deskId}"]`)) continue;
+
+    const fill = svg.querySelector(
+      `[data-desk-id="${deskId}"] .desk-fill`,
+    );
+    if (!(fill instanceof SVGGraphicsElement)) continue;
+
+    const corner = topRightIn(layer, fill);
+    if (!corner) continue;
+
+    const star = document.createElementNS(SVG_NS, 'text');
+    star.setAttribute('class', 'desk-star');
+    star.setAttribute('data-star-for', deskId);
+    star.setAttribute('x', String(corner.x - 3));
+    star.setAttribute('y', String(corner.y + 14));
+    star.setAttribute('text-anchor', 'end');
+    star.setAttribute('font-size', '13');
+    star.setAttribute('fill', STAR_COLOR);
+    star.textContent = STAR_GLYPH;
+    layer.append(star);
+  }
+}
+
 function LegendItem({
   color,
   gradient,
+  dashed,
+  glyph,
   label,
 }: {
   color?: string;
   gradient?: string;
+  dashed?: boolean;
+  glyph?: string;
   label: string;
 }) {
   return (
     <span className="flex items-center gap-2">
-      <span
-        className="inline-block h-4 w-4 rounded border"
-        style={gradient ? { backgroundImage: gradient } : { backgroundColor: color }}
-      />
+      {glyph ? (
+        <span
+          aria-hidden
+          className="inline-flex h-4 w-4 items-center justify-center text-base leading-none"
+          style={{ color: STAR_COLOR }}
+        >
+          {glyph}
+        </span>
+      ) : (
+        <span
+          className={cn(
+            'inline-block h-4 w-4 rounded border',
+            dashed && 'border-2 border-dashed border-slate-600',
+          )}
+          style={
+            gradient ? { backgroundImage: gradient } : { backgroundColor: color }
+          }
+        />
+      )}
       {label}
     </span>
   );

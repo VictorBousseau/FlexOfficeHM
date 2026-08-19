@@ -5,17 +5,23 @@ import { format, isSameDay } from 'date-fns';
 import { fr } from 'date-fns/locale';
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { getReservableDates } from '@/lib/booking-rules';
+import { getReservableDates, toDateKey } from '@/lib/booking-rules';
 import { cn } from '@/lib/utils';
 
 interface WeekDayPickerProps {
   selectedDate: Date;
   onSelect: (date: Date) => void;
+  /** Cles `yyyy-MM-dd` des jours portant au moins un evenement d'equipe. */
+  eventDates?: Set<string>;
 }
 
 const WEEK_LABELS = ['Cette semaine', 'Semaine +1', 'Semaine +2'];
 
-export function WeekDayPicker({ selectedDate, onSelect }: WeekDayPickerProps) {
+export function WeekDayPicker({
+  selectedDate,
+  onSelect,
+  eventDates,
+}: WeekDayPickerProps) {
   const weeks = useMemo(() => {
     const dates = getReservableDates();
     return [dates.slice(0, 5), dates.slice(5, 10), dates.slice(10, 15)];
@@ -48,6 +54,7 @@ export function WeekDayPicker({ selectedDate, onSelect }: WeekDayPickerProps) {
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
             {week.map((day) => {
               const active = isSameDay(day, selectedDate);
+              const hasEvent = eventDates?.has(toDateKey(day)) ?? false;
               return (
                 <button
                   key={format(day, 'yyyy-MM-dd')}
@@ -66,13 +73,23 @@ export function WeekDayPicker({ selectedDate, onSelect }: WeekDayPickerProps) {
                   </span>
                   <span
                     className={cn(
-                      'text-xs capitalize',
+                      'flex items-center gap-1.5 text-xs capitalize',
                       active
                         ? 'text-primary-foreground/80'
                         : 'text-muted-foreground',
                     )}
                   >
                     {format(day, 'd MMM', { locale: fr })}
+                    {hasEvent && (
+                      <span
+                        aria-label="Evenement prevu"
+                        title="Evenement prevu"
+                        className={cn(
+                          'inline-block h-1.5 w-1.5 rounded-full',
+                          active ? 'bg-primary-foreground' : 'bg-amber-500',
+                        )}
+                      />
+                    )}
                   </span>
                 </button>
               );

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { format, parseISO } from 'date-fns';
 import { fr } from 'date-fns/locale';
-import { PlusCircle, Search, XCircle } from 'lucide-react';
+import { PartyPopper, PlusCircle, Search, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Header } from '@/components/Header';
@@ -11,7 +11,12 @@ import { NamePromptModal } from '@/components/NamePromptModal';
 import { supabase } from '@/lib/supabase';
 import { useCurrentUser } from '@/lib/use-current-user';
 import { cn } from '@/lib/utils';
-import type { BookingEvent, Desk, Slot } from '@/types/database';
+import type {
+  BookingEvent,
+  DayEventLog,
+  Desk,
+  Slot,
+} from '@/types/database';
 
 const SLOT_LABEL: Record<Slot, string> = {
   morning: 'Matin',
@@ -20,10 +25,16 @@ const SLOT_LABEL: Record<Slot, string> = {
 
 const EVENT_LIMIT = 500;
 
+/** Ligne d'historique, quelle que soit sa source. */
+type HistoryRow =
+  | { kind: 'booking'; row: BookingEvent }
+  | { kind: 'day_event'; row: DayEventLog };
+
 export default function HistoriquePage() {
   const { userName, setUserName, loaded } = useCurrentUser();
 
   const [events, setEvents] = useState<BookingEvent[]>([]);
+  const [dayEventLogs, setDayEventLogs] = useState<DayEventLog[]>([]);
   const [desks, setDesks] = useState<Desk[]>([]);
   const [mounted, setMounted] = useState(false);
   const [query, setQuery] = useState('');
@@ -92,18 +103,70 @@ export default function HistoriquePage() {
     };
   }, [refresh]);
 
+  const refreshDayEventLogs = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('day_event_logs')
+      .select('*')
+      .order('event_at', { ascending: false })
+      .limit(EVENT_LIMIT);
+    if (error) {
+      toast.error("Impossible de charger l'historique des evenements.");
+      return;
+    }
+    setDayEventLogs((data ?? []) as DayEventLog[]);
+  }, []);
+
+  useEffect(() => {
+    void refreshDayEventLogs();
+  }, [refreshDayEventLogs]);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel('day-event-logs-realtime')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'day_event_logs' },
+        () => {
+          void refreshDayEventLogs();
+        },
+      )
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [refreshDayEventLogs]);
+
+  // Les deux flux fusionnes en une seule chronologie.
+  const rows = useMemo<HistoryRow[]>(() => {
+    const merged: HistoryRow[] = [
+      ...events.map((row): HistoryRow => ({ kind: 'booking', row })),
+      ...dayEventLogs.map((row): HistoryRow => ({ kind: 'day_event', row })),
+    ];
+    merged.sort((a, b) => b.row.event_at.localeCompare(a.row.event_at));
+    return merged.slice(0, EVENT_LIMIT);
+  }, [events, dayEventLogs]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (q.length === 0) return events;
-    return events.filter((e) => {
-      const label = (deskLabels.get(e.desk_id) ?? e.desk_id).toLowerCase();
+    if (q.length === 0) return rows;
+    return rows.filter((entry) => {
+      if (entry.kind === 'booking') {
+        const e = entry.row;
+        const label = (deskLabels.get(e.desk_id) ?? e.desk_id).toLowerCase();
+        return (
+          e.user_name.toLowerCase().includes(q) ||
+          e.desk_id.toLowerCase().includes(q) ||
+          label.includes(q) ||
+          (e.team_label ?? '').toLowerCase().includes(q)
+        );
+      }
+      const e = entry.row;
       return (
         e.user_name.toLowerCase().includes(q) ||
-        e.desk_id.toLowerCase().includes(q) ||
-        label.includes(q)
+        e.title.toLowerCase().includes(q)
       );
     });
-  }, [events, deskLabels, query]);
+  }, [rows, deskLabels, query]);
 
   const needsName = loaded && userName.trim() === '';
 
@@ -113,10 +176,11 @@ export default function HistoriquePage() {
 
       <main className="mx-auto max-w-4xl space-y-5 px-4 py-6">
         <div>
-          <h2 className="text-xl font-bold">Historique des reservations</h2>
+          <h2 className="text-xl font-bold">Historique</h2>
           <p className="text-sm text-muted-foreground">
-            Toutes les reservations et annulations sont journalisees. Utile en
-            cas de conflit pour reconstituer la chronologie.
+            Reservations, annulations et evenements d&apos;equipe sont
+            journalises. Utile en cas de conflit pour reconstituer la
+            chronologie.
           </p>
         </div>
 
@@ -126,7 +190,7 @@ export default function HistoriquePage() {
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Filtrer par prenom, place (ex: Victor, 3.06, OS4.1)..."
+            placeholder="Filtrer par prenom, place ou evenement (ex: Victor, 3.06, cookie)..."
             className="flex h-10 w-full rounded-md border border-input bg-background pl-9 pr-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             aria-label="Filtrer l'historique"
           />
@@ -138,7 +202,7 @@ export default function HistoriquePage() {
           </p>
         ) : filtered.length === 0 ? (
           <div className="rounded-lg border border-dashed py-16 text-center text-sm text-muted-foreground">
-            {events.length === 0
+            {rows.length === 0
               ? 'Aucun evenement enregistre pour le moment.'
               : 'Aucun resultat pour ce filtre.'}
           </div>
@@ -149,7 +213,9 @@ export default function HistoriquePage() {
                 <tr className="border-b bg-muted/50 text-xs text-muted-foreground">
                   <th className="px-3 py-2 text-left font-medium">Quand</th>
                   <th className="px-3 py-2 text-left font-medium">Action</th>
-                  <th className="px-3 py-2 text-left font-medium">Place</th>
+                  <th className="px-3 py-2 text-left font-medium">
+                    Place / Evenement
+                  </th>
                   <th className="px-3 py-2 text-left font-medium">
                     Jour / creneau
                   </th>
@@ -157,11 +223,17 @@ export default function HistoriquePage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((event) => {
-                  const isBooked = event.event_type === 'booked';
+                {filtered.map((entry) => {
+                  const event = entry.row;
+                  const isBooking = entry.kind === 'booking';
+                  const isPositive =
+                    entry.kind === 'booking'
+                      ? entry.row.event_type === 'booked'
+                      : entry.row.log_type === 'event_created';
+
                   return (
                     <tr
-                      key={event.id}
+                      key={`${entry.kind}-${event.id}`}
                       className="border-b last:border-0 align-top"
                     >
                       <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
@@ -172,33 +244,74 @@ export default function HistoriquePage() {
                       <td className="px-3 py-2">
                         <span
                           className={cn(
-                            'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium',
-                            isBooked
-                              ? 'bg-green-100 text-green-800'
-                              : 'bg-red-100 text-red-800',
+                            'inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium',
+                            !isBooking
+                              ? isPositive
+                                ? 'bg-amber-100 text-amber-900'
+                                : 'bg-slate-100 text-slate-700'
+                              : isPositive
+                                ? 'bg-green-100 text-green-800'
+                                : 'bg-red-100 text-red-800',
                           )}
                         >
-                          {isBooked ? (
+                          {!isBooking ? (
+                            <PartyPopper className="h-3 w-3" />
+                          ) : isPositive ? (
                             <PlusCircle className="h-3 w-3" />
                           ) : (
                             <XCircle className="h-3 w-3" />
                           )}
-                          {isBooked ? 'Reserve' : 'Annule'}
+                          {isBooking
+                            ? isPositive
+                              ? 'Reserve'
+                              : 'Annule'
+                            : isPositive
+                              ? 'Evenement cree'
+                              : 'Evenement supprime'}
                         </span>
                       </td>
                       <td className="px-3 py-2">
-                        {deskLabels.get(event.desk_id) ?? event.desk_id}
+                        {entry.kind === 'booking' ? (
+                          <>
+                            {deskLabels.get(entry.row.desk_id) ??
+                              entry.row.desk_id}
+                            {entry.row.team_label && (
+                              <span className="text-muted-foreground">
+                                {' '}
+                                &mdash; salle entiere,{' '}
+                                {entry.row.team_label}
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          entry.row.title
+                        )}
                       </td>
                       <td className="whitespace-nowrap px-3 py-2 capitalize">
                         {format(parseISO(event.date), 'EEE d MMM', {
                           locale: fr,
-                        })}{' '}
-                        ·{' '}
-                        <span className="text-muted-foreground">
-                          {SLOT_LABEL[event.slot]}
-                        </span>
+                        })}
+                        {event.slot ? (
+                          <>
+                            {' '}
+                            ·{' '}
+                            <span className="text-muted-foreground">
+                              {SLOT_LABEL[event.slot]}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            {' '}
+                            ·{' '}
+                            <span className="text-muted-foreground">
+                              Journee
+                            </span>
+                          </>
+                        )}
                       </td>
-                      <td className="px-3 py-2 font-medium">{event.user_name}</td>
+                      <td className="px-3 py-2 font-medium">
+                        {event.user_name}
+                      </td>
                     </tr>
                   );
                 })}

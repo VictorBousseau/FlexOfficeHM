@@ -34,6 +34,9 @@ App interne de réservation de bureaux en flex office pour l'équipe Distributio
 3. Une place = 1 personne max par créneau (contrainte SQL unique)
 4. Pas de week-end. Pas de gestion jours fériés en V1.
 5. Matching utilisateur par nom (insensible casse + trim). Pseudo en localStorage.
+6. **Privatisation de salle** : une salle de réunion peut être réservée en entier. Ce n'est pas un objet métier distinct — c'est un LOT de réservations classiques (toutes les places de la salle, même créneau, même nom) partageant un `room_booking_id`. La contrainte unique reste donc le garde-fou anti-collision.
+7. Une privatisation **consomme le créneau de la personne** au même titre qu'une place : la règle n°2 reste vraie malgré les 6 lignes insérées. Un créneau privatisé ne se gère jamais place par place (annuler une ligne casserait le lot).
+8. Les **événements d'équipe** (`day_events`) sont purement informatifs : rattachés à une date et éventuellement à un créneau, ils ne bloquent aucune place. Création et suppression libres, journalisées dans `day_event_logs`.
 
 ## Architecture
 
@@ -42,26 +45,41 @@ src/
   app/
     page.tsx
     mes-reservations/page.tsx
+    historique/page.tsx
     layout.tsx
     globals.css
   components/
     FloorPlan.tsx
+    Header.tsx
     WeekDayPicker.tsx
-    SlotToggle.tsx
     BookingModal.tsx
+    RoomBookingModal.tsx
     NamePromptModal.tsx
     OccupantsTable.tsx
-    ui/
+    EventsBanner.tsx
+    EventFormModal.tsx
+    ui/            (button, card, dialog, input, tabs, sonner)
   lib/
     supabase.ts
     booking-rules.ts
     use-current-user.ts
+    utils.ts
   types/
     database.ts
+scripts/
+  process-svg.mjs  (floor-plan-raw.svg -> public/floor-plan.svg, lancé à la main)
 supabase/
   migrations/
-    0001_init.sql
+    0001_init.sql            desks + bookings + RLS + seed 47 places
+    0002_booking_events.sql  historique des réservations (trigger)
+    0003_dual_screen.sql     desks.has_dual_screen
+    0004_room_bookings.sql   bookings.room_booking_id + team_label
+    0005_day_events.sql      day_events + day_event_logs
 ```
+
+Les migrations sont **additives et idempotentes** : elles se rejouent dans l'éditeur SQL
+Supabase sans perdre les données existantes. Ne jamais introduire de `drop table`,
+`delete` ou re-seed destructif de `desks`.
 
 ## Pièges connus
 
@@ -71,6 +89,8 @@ supabase/
 - **localStorage SSR** : wrapper les lectures dans `useEffect` pour éviter les erreurs hydration
 - **IDs avec points** : `document.querySelector('#desk-3.06-1')` échoue (interprété comme classes CSS). Utiliser `document.querySelector('[data-desk-id="3.06-1"]')`.
 - **Labels indicatifs dans le SVG** : les textes `3.06`, `3.32`, etc. sans suffixe sont des repères visuels, à ignorer pour le matching place ↔ rectangle.
+- **Enrichissements du SVG à l'exécution** : l'étoile « double écran » et le liseré pointillé « salle privatisée » sont injectés par `FloorPlan.tsx` (effet de recolorisation), pas par `scripts/process-svg.mjs`. Le fichier `public/floor-plan.svg` n'a donc pas à être régénéré pour ces marqueurs. L'étoile est positionnée via `getBBox()` sur le path `.desk-fill` : le `<text>` est frère dans le même `<g>`, donc dans le même repère local — aucun transform à recalculer.
+- **Ajouter une place** demande trois modifications en parallèle : le seed SQL, la source Excalidraw + `public/floor-plan.svg` régénéré, et le tableau `expected` codé en dur dans `scripts/process-svg.mjs`.
 
 ## Variables d'environnement
 

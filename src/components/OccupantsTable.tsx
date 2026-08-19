@@ -4,6 +4,8 @@ import { Button } from '@/components/ui/button';
 import {
   getDeskDay,
   getGroupOccupancy,
+  getRoomDay,
+  type RoomBookingInfo,
   type SlotState,
 } from '@/lib/booking-rules';
 import type { Booking, Desk, DeskKind } from '@/types/database';
@@ -38,6 +40,16 @@ function SlotCell({ state }: { state: SlotState }) {
   return (
     <span className={state.status === 'mine' ? 'font-medium text-blue-700' : ''}>
       {state.booking.user_name}
+    </span>
+  );
+}
+
+/** Cellule d'un creneau ou la salle est privatisee. */
+function RoomSlotCell({ info }: { info: RoomBookingInfo | null }) {
+  if (!info) return <span className="text-muted-foreground">&mdash;</span>;
+  return (
+    <span className={info.mine ? 'font-medium text-blue-700' : 'font-medium'}>
+      {info.teamLabel ? `${info.teamLabel} (${info.userName})` : info.userName}
     </span>
   );
 }
@@ -78,6 +90,23 @@ export function OccupantsTable({
                   bookings,
                 });
 
+                // Privatisation : une seule ligne au lieu de repeter le meme
+                // nom sur toutes les places de la salle.
+                const roomDay =
+                  section.kind === 'meeting_room'
+                    ? getRoomDay({
+                        bureauGroup: group,
+                        date,
+                        desks,
+                        bookings,
+                        currentUserName,
+                      })
+                    : null;
+                const roomMorning = roomDay?.morning.roomBooking ?? null;
+                const roomAfternoon = roomDay?.afternoon.roomBooking ?? null;
+                const fullyPrivate =
+                  roomMorning !== null && roomAfternoon !== null;
+
                 return (
                   <div key={group} className="overflow-hidden rounded-lg border">
                     <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/50 px-3 py-2">
@@ -103,37 +132,83 @@ export function OccupantsTable({
                         </tr>
                       </thead>
                       <tbody>
-                        {groupDesks.map((desk) => {
-                          const day = getDeskDay({
-                            deskId: desk.id,
-                            date,
-                            bookings,
-                            currentUserName,
-                          });
-                          return (
-                            <tr
-                              key={desk.id}
-                              className="border-b last:border-0"
-                            >
-                              <td className="px-3 py-2">{desk.label}</td>
-                              <td className="px-3 py-2">
-                                <SlotCell state={day.morning} />
-                              </td>
-                              <td className="px-3 py-2">
-                                <SlotCell state={day.afternoon} />
-                              </td>
-                              <td className="px-3 py-2 text-right">
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => onDeskClick(desk.id)}
-                                >
-                                  Gerer
-                                </Button>
-                              </td>
-                            </tr>
-                          );
-                        })}
+                        {(roomMorning || roomAfternoon) && (
+                          <tr className="border-b bg-amber-50 last:border-0">
+                            <td className="px-3 py-2 font-medium">
+                              Salle entiere
+                            </td>
+                            <td className="px-3 py-2">
+                              <RoomSlotCell info={roomMorning} />
+                            </td>
+                            <td className="px-3 py-2">
+                              <RoomSlotCell info={roomAfternoon} />
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => onDeskClick(groupDesks[0].id)}
+                              >
+                                Gerer
+                              </Button>
+                            </td>
+                          </tr>
+                        )}
+                        {!fullyPrivate &&
+                          groupDesks.map((desk) => {
+                            const day = getDeskDay({
+                              deskId: desk.id,
+                              date,
+                              bookings,
+                              currentUserName,
+                            });
+                            return (
+                              <tr
+                                key={desk.id}
+                                className="border-b last:border-0"
+                              >
+                                <td className="px-3 py-2">
+                                  {desk.label}
+                                  {desk.has_dual_screen && (
+                                    <span
+                                      className="ml-1.5 text-amber-700"
+                                      title="Double ecran"
+                                      aria-label="Double ecran"
+                                    >
+                                      ★
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {roomMorning ? (
+                                    <span className="text-muted-foreground">
+                                      &mdash;
+                                    </span>
+                                  ) : (
+                                    <SlotCell state={day.morning} />
+                                  )}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {roomAfternoon ? (
+                                    <span className="text-muted-foreground">
+                                      &mdash;
+                                    </span>
+                                  ) : (
+                                    <SlotCell state={day.afternoon} />
+                                  )}
+                                </td>
+                                <td className="px-3 py-2 text-right">
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => onDeskClick(desk.id)}
+                                  >
+                                    Gerer
+                                  </Button>
+                                </td>
+                              </tr>
+                            );
+                          })}
                       </tbody>
                     </table>
                   </div>
