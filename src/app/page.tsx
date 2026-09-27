@@ -430,6 +430,8 @@ export default function HomePage() {
                 selectedDate={selectedDate}
                 onSelect={setSelectedDate}
                 eventDates={eventDates}
+                desks={desks}
+                bookings={bookings}
               />
               <p className="text-sm font-medium capitalize">
                 {format(selectedDate, 'EEEE d MMMM yyyy', { locale: fr })}

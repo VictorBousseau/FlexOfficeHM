@@ -6,13 +6,21 @@ import { fr } from 'date-fns/locale';
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { getReservableDates, toDateKey } from '@/lib/booking-rules';
+import { getDayOccupancy } from '@/lib/occupancy-stats';
 import { cn } from '@/lib/utils';
+import type { Booking, Desk } from '@/types/database';
 
 interface WeekDayPickerProps {
   selectedDate: Date;
   onSelect: (date: Date) => void;
   /** Cles `yyyy-MM-dd` des jours portant au moins un evenement d'equipe. */
   eventDates?: Set<string>;
+  /**
+   * Places et reservations de la fenetre affichee, pour les compteurs
+   * d'occupation. Deja chargees par la page : aucune requete supplementaire.
+   */
+  desks?: Desk[];
+  bookings?: Booking[];
 }
 
 const WEEK_LABELS = ['Cette semaine', 'Semaine +1', 'Semaine +2'];
@@ -21,11 +29,29 @@ export function WeekDayPicker({
   selectedDate,
   onSelect,
   eventDates,
+  desks,
+  bookings,
 }: WeekDayPickerProps) {
   const weeks = useMemo(() => {
     const dates = getReservableDates();
     return [dates.slice(0, 5), dates.slice(5, 10), dates.slice(10, 15)];
   }, []);
+
+  /**
+   * Compteurs d'occupation par jour, hors salles de reunion. Calcules en une
+   * passe sur les reservations deja en memoire : ils suivent donc le Realtime
+   * de la page sans canal supplementaire.
+   */
+  const counters = useMemo(() => {
+    if (!desks || !bookings || desks.length === 0) return null;
+    const map = new Map<string, ReturnType<typeof getDayOccupancy>>();
+    for (const week of weeks) {
+      for (const day of week) {
+        map.set(toDateKey(day), getDayOccupancy({ date: day, desks, bookings }));
+      }
+    }
+    return map;
+  }, [weeks, desks, bookings]);
 
   const selectedWeek = weeks.findIndex((week) =>
     week.some((d) => isSameDay(d, selectedDate)),
@@ -54,7 +80,9 @@ export function WeekDayPicker({
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
             {week.map((day) => {
               const active = isSameDay(day, selectedDate);
-              const hasEvent = eventDates?.has(toDateKey(day)) ?? false;
+              const dayKey = toDateKey(day);
+              const hasEvent = eventDates?.has(dayKey) ?? false;
+              const counts = counters?.get(dayKey);
               return (
                 <button
                   key={format(day, 'yyyy-MM-dd')}
@@ -91,6 +119,22 @@ export function WeekDayPicker({
                       />
                     )}
                   </span>
+                  {counts && (
+                    <span
+                      title={`${counts.occupiedDesks} bureaux occupes sur ${counts.totalDesks} · ${counts.occupiedSeats} places occupees sur ${counts.totalSeats} (hors salles de reunion)`}
+                      className={cn(
+                        'text-xs',
+                        active
+                          ? 'text-primary-foreground/80'
+                          : 'text-muted-foreground',
+                      )}
+                    >
+                      {counts.occupiedDesks}/{counts.totalDesks}
+                      <span className="hidden sm:inline"> bureaux</span> ·{' '}
+                      {counts.occupiedSeats}/{counts.totalSeats}
+                      <span className="hidden sm:inline"> places</span>
+                    </span>
+                  )}
                 </button>
               );
             })}
