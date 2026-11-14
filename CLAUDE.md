@@ -29,7 +29,11 @@ App interne de réservation de bureaux en flex office pour l'équipe Distributio
 
 ## Règles métier critiques
 
-1. Fenêtre de réservation = semaine courante + 2 semaines suivantes (3 semaines, lundi → vendredi)
+1. **Fenêtre de réservation, bornée par deux règles indépendantes** (`getReservableDates`) :
+   - **début = aujourd'hui.** Les jours écoulés ne sont jamais proposés : le mardi, le lundi a disparu. Le week-end, la semaine courante est épuisée et l'affichage démarre au lundi suivant.
+   - **fin = vendredi de la 3ᵉ semaine**, celle-ci n'étant comptée qu'à partir du **lundi 9h30** (`OPENING_OFFSET_MINUTES`), pour éviter la ruée de 00h01.
+
+   Conséquence : le nombre de jours affichés varie de **15** (lundi après 9h30) à **10** (week-end et lundi avant 9h30), et l'horizon de réservation passe de 15 jours ouvrés le lundi à 11 le vendredi. C'est assumé : on ne peut pas avoir à la fois une ouverture hebdomadaire et un horizon constant.
 2. Une personne ne peut avoir QU'UNE réservation par créneau (matin OU après-midi) sur l'ensemble des bureaux
 3. Une place = 1 personne max par créneau (contrainte SQL unique)
 4. Pas de week-end. Pas de gestion jours fériés en V1.
@@ -39,6 +43,8 @@ App interne de réservation de bureaux en flex office pour l'équipe Distributio
 8. Les **événements d'équipe** (`day_events`) sont purement informatifs : rattachés à une date et éventuellement à un créneau, ils ne bloquent aucune place. Création et suppression libres, journalisées dans `day_event_logs`.
 9. **Périmètre statistique : les salles de réunion sont exclues** de tous les compteurs et de toutes les statistiques (`kind <> 'meeting_room'`). SDR1/SDR2 servent aussi de salles de séminaire, leurs privatisations fausseraient les taux. Périmètre restant : 35 places réparties en 16 `bureau_group`. Ces totaux ne sont **jamais codés en dur** — ils sont dérivés de la table `desks` filtrée, pour rester justes si les places évoluent.
 10. **Base de calcul des compteurs = la journée entière.** Une place est « occupée » un jour donné dès qu'elle porte une réservation le matin OU l'après-midi : une place prise le matin par A et l'après-midi par B compte pour 1. Un bureau (`bureau_group`) compte pour 1 quel que soit son nombre d'occupants.
+11. **`canBook` vérifie la fenêtre** via `isReservableDate`. C'est le garde-fou de l'onglet laissé ouvert : si la frontière a été franchie (minuit, ou lundi 9h30) depuis l'affichage, la réservation est refusée avec un message invitant à rafraîchir. Avant cela, rien n'empêchait de réserver dans le passé.
+12. **Le découpage en semaines est dynamique** (`groupByWeek`). Le `WeekDayPicker` ne tranche plus par blocs de 5 : le nombre de groupes (2 ou 3) et leur taille (1 à 5 jours) varient. Les libellés viennent de l'écart réel de semaines avec aujourd'hui, jamais de l'index — le samedi, le premier groupe est donc « Semaine prochaine » et non « Cette semaine ».
 
 ## Architecture
 
@@ -99,14 +105,24 @@ Supabase sans perdre les données existantes. Ne jamais introduire de `drop tabl
 - **Ajouter une place** demande trois modifications en parallèle : le seed SQL, la source Excalidraw + `public/floor-plan.svg` régénéré, et le tableau `expected` codé en dur dans `scripts/process-svg.mjs`.
 - **Limite Supabase de 1000 lignes par réponse** : la table `bookings` dépasse déjà ce volume (~2 000 lignes). Toute lecture de l'historique complet doit passer par `fetchAllBookings()` (`lib/fetch-all-bookings.ts`), qui pagine avec `.range()`. Ne jamais afficher de statistiques calculées sur une réponse tronquée.
 - **Couleurs des graphiques** : palette catégorielle validée (contraste + daltonisme) — places `#2a78d6`, bureaux `#eb6834`. Les histogrammes sont mono-série, donc une seule teinte. Ne pas improviser de nouvelles couleurs sans revalider.
+- **La fenêtre n'est pas rafraîchie automatiquement.** Les appels à `getReservableDates()` sont dans des `useMemo(..., [])` : un onglet laissé ouvert garde la fenêtre calculée au montage et ne verra ni la bascule de minuit ni celle du lundi 9h30. **C'est un choix assumé** (décision de Victor) : les utilisateurs rafraîchissent la page. `canBook` sert de garde-fou côté données. Ne pas « corriger » ça sans en reparler.
+- **Grille à colonnes variables** : `sm:grid-cols-[repeat(var(--cols),minmax(0,1fr))]` avec `--cols` posé en style inline. Un `grid-cols-${n}` construit dynamiquement serait purgé au build — la classe doit rester statique, seule la variable CSS change.
+- **Tabs Radix et tests automatisés** : un `element.click()` synthétique n'active pas un `TabsTrigger` (Radix écoute `mousedown`). Dispatcher `mousedown` + `mouseup`.
 
 ## Tests
 
-`npm test` (vitest). Seul `lib/occupancy-stats.ts` est couvert pour l'instant — c'est
-le candidat naturel pour la suite avec `lib/booking-rules.ts`, tous deux purs et sans
-dépendance Supabase. Les cas couverts : exclusion des salles de réunion, bureau à deux
-places occupé par une seule personne, place prise le matin et l'après-midi par deux
-personnes différentes, jours ouvrés vides comptés à 0 %.
+`npm test` (vitest). Les deux modules purs sont couverts, 33 tests :
+
+- **`lib/occupancy-stats.ts`** (11) — exclusion des salles de réunion, bureau à deux places
+  occupé par une seule personne, place prise le matin et l'après-midi par deux personnes
+  différentes, jours ouvrés vides comptés à 0 %.
+- **`lib/booking-rules.ts`** (22) — bascule à 9h30 pile (9h29 → 10 jours, 9h30 → 15),
+  disparition des jours écoulés, week-end, libellés de `groupByWeek` selon le jour de la
+  semaine, garde-fou de fenêtre dans `canBook`.
+
+Toutes les fonctions prennent `now` en paramètre injectable : ne jamais appeler `new Date()`
+à l'intérieur d'une fonction testée, sinon les tests deviennent dépendants du jour où ils
+tournent.
 
 ## Variables d'environnement
 

@@ -1,6 +1,14 @@
 // Logique metier pure — aucune dependance Supabase, entierement testable.
 
-import { addDays, format, isWeekend, startOfWeek } from 'date-fns';
+import {
+  addDays,
+  differenceInCalendarWeeks,
+  format,
+  isWeekend,
+  startOfDay,
+  startOfWeek,
+  subMinutes,
+} from 'date-fns';
 import type { Booking, Desk, Slot } from '@/types/database';
 
 /** Format SQL court d'une date metier. */
@@ -14,25 +22,95 @@ export function normalizeName(name: string): string {
 }
 
 /**
- * Jours reservables : du lundi de la semaine courante au vendredi de la
- * semaine N+2, soit 3 semaines x 5 jours ouvres = 15 dates.
+ * Heure d'ouverture de la semaine N+2, le lundi matin, en minutes depuis
+ * minuit. Avant cette heure la nouvelle semaine n'est pas encore reservable :
+ * cela evite la ruee de 00h01 (voir CLAUDE.md, regle 11).
  */
-export function getReservableDates(today: Date = new Date()): Date[] {
-  const monday = startOfWeek(today, { weekStartsOn: 1 });
+export const OPENING_OFFSET_MINUTES = 9 * 60 + 30;
+
+/**
+ * Jours reservables, bornes par deux regles independantes :
+ *
+ * - DEBUT : aujourd'hui. Les jours ecoules ne sont jamais proposes — le mardi,
+ *   le lundi a disparu.
+ * - FIN : le vendredi de la 3e semaine, cette 3e semaine n'etant comptee qu'a
+ *   partir du lundi 9h30 (decalage de la date de reference).
+ *
+ * Le nombre de dates varie donc de 15 (lundi apres 9h30) a 10 (week-end et
+ * lundi avant 9h30).
+ */
+export function getReservableDates(now: Date = new Date()): Date[] {
+  // Lundi 09h29 -> dimanche 23h59 -> semaine precedente : S+2 pas encore ouverte.
+  // Lundi 09h30 -> lundi 00h00    -> semaine courante    : S+2 ouverte.
+  const reference = subMinutes(now, OPENING_OFFSET_MINUTES);
+  const lastDay = addDays(startOfWeek(reference, { weekStartsOn: 1 }), 18);
+
   const dates: Date[] = [];
-  for (let week = 0; week < 3; week += 1) {
-    for (let day = 0; day < 5; day += 1) {
-      dates.push(addDays(monday, week * 7 + day));
-    }
+  for (
+    let cursor = startOfDay(now);
+    cursor <= lastDay;
+    cursor = addDays(cursor, 1)
+  ) {
+    if (!isWeekend(cursor)) dates.push(cursor);
   }
   return dates;
 }
 
 /** Vrai si la date tombe dans la fenetre reservable (et n'est pas un week-end). */
-export function isReservableDate(date: Date, today: Date = new Date()): boolean {
+export function isReservableDate(date: Date, now: Date = new Date()): boolean {
   if (isWeekend(date)) return false;
   const key = toDateKey(date);
-  return getReservableDates(today).some((d) => toDateKey(d) === key);
+  return getReservableDates(now).some((d) => toDateKey(d) === key);
+}
+
+/** Une semaine affichee dans le selecteur de jours. */
+export interface ReservableWeek {
+  /** Ecart en semaines avec la semaine courante : 0, 1 ou 2. */
+  offset: number;
+  label: string;
+  days: Date[];
+}
+
+const WEEK_LABELS: Record<number, string> = {
+  0: 'Cette semaine',
+  1: 'Semaine prochaine',
+  2: 'Semaine +2',
+};
+
+/**
+ * Regroupe les dates reservables par semaine civile.
+ *
+ * Le libelle vient de l'ecart reel avec la semaine courante, jamais de la
+ * position dans le tableau : le samedi, ou la semaine courante est epuisee, le
+ * premier groupe est donc « Semaine prochaine » et non « Cette semaine ».
+ */
+export function groupByWeek(
+  dates: Date[],
+  now: Date = new Date(),
+): ReservableWeek[] {
+  const currentMonday = startOfWeek(now, { weekStartsOn: 1 });
+  // Map : conserve l'ordre d'insertion, et `dates` est chronologique.
+  const groups = new Map<string, ReservableWeek>();
+
+  for (const day of dates) {
+    const monday = startOfWeek(day, { weekStartsOn: 1 });
+    const key = toDateKey(monday);
+    let group = groups.get(key);
+    if (!group) {
+      const offset = differenceInCalendarWeeks(monday, currentMonday, {
+        weekStartsOn: 1,
+      });
+      group = {
+        offset,
+        label: WEEK_LABELS[offset] ?? `Semaine +${offset}`,
+        days: [],
+      };
+      groups.set(key, group);
+    }
+    group.days.push(day);
+  }
+
+  return [...groups.values()];
 }
 
 /**
@@ -45,8 +123,10 @@ export function canBook(params: {
   date: Date;
   slot: Slot;
   existingBookings: Booking[];
+  /** Injectable pour les tests ; par defaut l'instant courant. */
+  now?: Date;
 }): { ok: true } | { ok: false; reason: string } {
-  const { userName, date, slot, existingBookings } = params;
+  const { userName, date, slot, existingBookings, now = new Date() } = params;
   const name = normalizeName(userName);
 
   if (name.length === 0) {
@@ -54,6 +134,15 @@ export function canBook(params: {
   }
   if (isWeekend(date)) {
     return { ok: false, reason: 'Pas de reservation possible le week-end.' };
+  }
+  // Garde-fou pour un onglet laisse ouvert : la fenetre a pu bouger depuis
+  // l'affichage (minuit, ou lundi 9h30).
+  if (!isReservableDate(date, now)) {
+    return {
+      ok: false,
+      reason:
+        "Ce jour n'est plus ouvert a la reservation. Rafraichis la page pour voir les jours disponibles.",
+    };
   }
   // TODO: bloquer jours feries
 

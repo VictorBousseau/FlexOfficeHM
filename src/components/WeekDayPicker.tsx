@@ -1,11 +1,15 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, type CSSProperties } from 'react';
 import { format, isSameDay } from 'date-fns';
 import { fr } from 'date-fns/locale';
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { getReservableDates, toDateKey } from '@/lib/booking-rules';
+import {
+  getReservableDates,
+  groupByWeek,
+  toDateKey,
+} from '@/lib/booking-rules';
 import { getDayOccupancy } from '@/lib/occupancy-stats';
 import { cn } from '@/lib/utils';
 import type { Booking, Desk } from '@/types/database';
@@ -23,8 +27,6 @@ interface WeekDayPickerProps {
   bookings?: Booking[];
 }
 
-const WEEK_LABELS = ['Cette semaine', 'Semaine +1', 'Semaine +2'];
-
 export function WeekDayPicker({
   selectedDate,
   onSelect,
@@ -32,9 +34,14 @@ export function WeekDayPicker({
   desks,
   bookings,
 }: WeekDayPickerProps) {
+  /**
+   * Semaines affichees. Le nombre de groupes (2 ou 3) et le nombre de jours
+   * par groupe (1 a 5) varient : les jours ecoules disparaissent et la
+   * semaine +2 n'apparait qu'au lundi 9h30.
+   */
   const weeks = useMemo(() => {
-    const dates = getReservableDates();
-    return [dates.slice(0, 5), dates.slice(5, 10), dates.slice(10, 15)];
+    const now = new Date();
+    return groupByWeek(getReservableDates(now), now);
   }, []);
 
   /**
@@ -46,39 +53,56 @@ export function WeekDayPicker({
     if (!desks || !bookings || desks.length === 0) return null;
     const map = new Map<string, ReturnType<typeof getDayOccupancy>>();
     for (const week of weeks) {
-      for (const day of week) {
+      for (const day of week.days) {
         map.set(toDateKey(day), getDayOccupancy({ date: day, desks, bookings }));
       }
     }
     return map;
   }, [weeks, desks, bookings]);
 
-  const selectedWeek = weeks.findIndex((week) =>
-    week.some((d) => isSameDay(d, selectedDate)),
+  // L'onglet est identifie par son ecart de semaines, pas par son index :
+  // l'index se decale quand la semaine courante s'epuise.
+  const selected = weeks.find((week) =>
+    week.days.some((d) => isSameDay(d, selectedDate)),
   );
-  const activeWeek = selectedWeek === -1 ? 0 : selectedWeek;
+  const activeWeek = selected?.offset ?? weeks[0]?.offset ?? 0;
 
   return (
     <Tabs
       value={String(activeWeek)}
       onValueChange={(value) => {
-        const week = weeks[Number(value)];
-        if (week && !week.some((d) => isSameDay(d, selectedDate))) {
-          onSelect(week[0]);
+        const week = weeks.find((w) => String(w.offset) === value);
+        if (week && !week.days.some((d) => isSameDay(d, selectedDate))) {
+          onSelect(week.days[0]);
         }
       }}
     >
-      <TabsList className="grid w-full grid-cols-3">
-        {WEEK_LABELS.map((label, index) => (
-          <TabsTrigger key={label} value={String(index)}>
-            {label}
+      <TabsList
+        className="grid w-full grid-cols-[repeat(var(--cols),minmax(0,1fr))]"
+        style={
+          { '--cols': String(weeks.length) } as CSSProperties
+        }
+      >
+        {weeks.map((week) => (
+          <TabsTrigger key={week.offset} value={String(week.offset)}>
+            {week.label}
           </TabsTrigger>
         ))}
       </TabsList>
-      {weeks.map((week, index) => (
-        <TabsContent key={WEEK_LABELS[index]} value={String(index)}>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-            {week.map((day) => {
+      {weeks.map((week) => (
+        <TabsContent key={week.offset} value={String(week.offset)}>
+          {/*
+            Colonnes proportionnelles au nombre de jours restants : le
+            vendredi, la tuile unique occupe toute la largeur. Variable CSS
+            plutot qu'une classe dynamique, qui serait purgee au build.
+          */}
+          <div
+            className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(var(--cols),minmax(0,1fr))]"
+            style={
+              { '--cols': String(week.days.length) } as CSSProperties
+            }
+          >
+            {week.days.map((day) => {
               const active = isSameDay(day, selectedDate);
               const dayKey = toDateKey(day);
               const hasEvent = eventDates?.has(dayKey) ?? false;
